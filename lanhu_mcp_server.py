@@ -743,6 +743,683 @@ def _extract_design_tokens(sketch_data: dict) -> str:
     return '\n\n'.join(tokens)
 
 
+_ICON_MAX_SIZE = 128
+
+
+def _sketch_color_to_css_value(color) -> Optional[str]:
+    """Normalize Lanhu/Sketch color to a CSS color string for utility classes."""
+    if not color:
+        return None
+    if isinstance(color, str):
+        return color.strip() or None
+    if not isinstance(color, dict):
+        return None
+    if color.get('value'):
+        return str(color['value']).strip() or None
+    r = round(color.get('r', color.get('red', 0)))
+    g = round(color.get('g', color.get('green', 0)))
+    b = round(color.get('b', color.get('blue', 0)))
+    a = color.get('a', color.get('alpha', 1))
+    if a is not None and a < 1:
+        return f"rgba({r},{g},{b},{a})"
+    return f"rgb({r},{g},{b})"
+
+
+def _get_sketch_layer_frame(layer: dict) -> dict:
+    frame = layer.get('frame') or layer.get('bounds') or {}
+    if frame.get('width') or frame.get('height'):
+        return {
+            'x': round(float(frame.get('x', frame.get('left', 0)) or 0), 2),
+            'y': round(float(frame.get('y', frame.get('top', 0)) or 0), 2),
+            'width': round(float(frame.get('width', 0) or 0), 2),
+            'height': round(float(frame.get('height', 0) or 0), 2),
+        }
+    origin = layer.get('ddsOriginFrame') or layer.get('layerOriginFrame') or {}
+    if origin.get('width') or origin.get('height'):
+        return {
+            'x': round(float(origin.get('x', 0) or 0), 2),
+            'y': round(float(origin.get('y', 0) or 0), 2),
+            'width': round(float(origin.get('width', 0) or 0), 2),
+            'height': round(float(origin.get('height', 0) or 0), 2),
+        }
+    width = layer.get('width')
+    height = layer.get('height')
+    if width or height:
+        return {
+            'x': round(float(layer.get('left', 0) or 0), 2),
+            'y': round(float(layer.get('top', 0) or 0), 2),
+            'width': round(float(width or 0), 2),
+            'height': round(float(height or 0), 2),
+        }
+    return {}
+
+
+def _build_structure_uno_class(layer: dict) -> str:
+    classes = []
+    frame = _get_sketch_layer_frame(layer)
+
+    if frame.get('width'):
+        classes.append(f"w-{round(frame['width'])}px")
+    if frame.get('height'):
+        classes.append(f"h-{round(frame['height'])}px")
+
+    radius = layer.get('radius') or layer.get('cornerRadius')
+    if radius:
+        if isinstance(radius, (int, float)):
+            classes.append(f"rounded-{round(radius)}px")
+        elif isinstance(radius, list) and radius:
+            if len(set(radius)) == 1:
+                classes.append(f"rounded-{round(radius[0])}px")
+            else:
+                tl = radius[0] if len(radius) > 0 else 0
+                tr = radius[1] if len(radius) > 1 else 0
+                bl = radius[2] if len(radius) > 2 else 0
+                br = radius[3] if len(radius) > 3 else 0
+                if tl:
+                    classes.append(f"rounded-tl-{round(tl)}px")
+                if tr:
+                    classes.append(f"rounded-tr-{round(tr)}px")
+                if bl:
+                    classes.append(f"rounded-bl-{round(bl)}px")
+                if br:
+                    classes.append(f"rounded-br-{round(br)}px")
+        elif isinstance(radius, dict):
+            for key, css_key in (
+                ('topLeft', 'rounded-tl'),
+                ('topRight', 'rounded-tr'),
+                ('bottomLeft', 'rounded-bl'),
+                ('bottomRight', 'rounded-br'),
+            ):
+                value = radius.get(key, 0)
+                if value:
+                    classes.append(f"{css_key}-{round(value)}px")
+
+    fills = layer.get('fills') or []
+    if fills:
+        fill = fills[0]
+        if fill.get('isEnabled', True):
+            fill_color = _sketch_color_to_css_value((fill.get('color') or {}))
+            if fill_color:
+                safe_color = fill_color.replace(' ', '')
+                classes.append(f"bg-[{safe_color}]")
+    elif layer.get('fill'):
+        fill_color = _sketch_color_to_css_value((layer.get('fill') or {}).get('color'))
+        if fill_color:
+            classes.append(f"bg-[{fill_color.replace(' ', '')}]")
+
+    opacity = layer.get('opacity')
+    if opacity is not None:
+        opacity_value = opacity / 100 if opacity > 1 else opacity
+        if opacity_value < 1:
+            classes.append(f"opacity-{round(opacity_value * 100)}")
+
+    borders = layer.get('borders') or layer.get('strokes') or []
+    if borders:
+        border = borders[0]
+        if border.get('isEnabled', True):
+            thickness = border.get('thickness', 1)
+            classes.append(f"border-{round(thickness)}px")
+            border_color = _sketch_color_to_css_value(border.get('color'))
+            if border_color:
+                classes.append(f"border-[{border_color.replace(' ', '')}]")
+            classes.append('border-solid')
+
+    text_style = layer.get('textStyle') or {}
+    text_info = layer.get('textInfo') or {}
+    if text_style or text_info:
+        font_size = text_style.get('fontSize') or text_info.get('size')
+        if font_size:
+            classes.append(f"text-{round(float(font_size))}px")
+        font_weight = text_style.get('fontWeight')
+        if font_weight:
+            classes.append(f"font-{font_weight}")
+        elif text_info.get('bold'):
+            classes.append('font-bold')
+        text_color = _sketch_color_to_css_value(
+            text_style.get('color') or text_info.get('color')
+        )
+        if text_color:
+            classes.append(f"text-[{text_color.replace(' ', '')}]")
+        line_height = text_style.get('lineHeight') or text_info.get('lineHeight')
+        if line_height:
+            classes.append(f"leading-[{round(float(line_height))}px]")
+        letter_spacing = text_style.get('letterSpacing')
+        if letter_spacing:
+            classes.append(f"tracking-[{round(float(letter_spacing))}px]")
+        align = text_style.get('align') or text_info.get('justification')
+        if align:
+            align_map = {
+                'center': 'text-center',
+                'right': 'text-right',
+                'left': 'text-left',
+            }
+            classes.append(align_map.get(str(align).lower(), ''))
+
+    shadows = layer.get('shadows') or []
+    if shadows:
+        shadow = shadows[0]
+        if shadow.get('isEnabled', True):
+            shadow_color = _sketch_color_to_css_value(shadow.get('color'))
+            if shadow_color:
+                ox = round(shadow.get('offsetX', 0))
+                oy = round(shadow.get('offsetY', 0))
+                blur = round(shadow.get('blurRadius', shadow.get('blur', 0)))
+                classes.append(f"shadow-[{ox}px_{oy}px_{blur}px_{shadow_color.replace(' ', '')}]")
+
+    return ' '.join(cls for cls in classes if cls)
+
+
+def _is_structure_export_image(layer: dict, is_figma: bool) -> bool:
+    if layer.get('hasExportImage'):
+        return True
+    images = layer.get('images') or {}
+    if images.get('png_xxxhd') or images.get('svg'):
+        return True
+    if not is_figma and (layer.get('ddsImage') or {}).get('imageUrl'):
+        return True
+    image = layer.get('image') or {}
+    if image.get('imageUrl') or image.get('svgUrl'):
+        if is_figma:
+            return bool(layer.get('hasExportImage'))
+        return True
+    return False
+
+
+def _get_structure_image_url(layer: dict) -> Optional[str]:
+    images = layer.get('images') or {}
+    if images.get('png_xxxhd'):
+        return images['png_xxxhd']
+    if images.get('svg'):
+        return images['svg']
+    image = layer.get('image') or {}
+    if image.get('imageUrl'):
+        return image['imageUrl']
+    if image.get('svgUrl'):
+        return image['svgUrl']
+    dds_image = layer.get('ddsImage') or {}
+    if dds_image.get('imageUrl'):
+        return dds_image['imageUrl']
+    return None
+
+
+def _classify_structure_image_type(layer: dict) -> str:
+    frame = _get_sketch_layer_frame(layer)
+    width = frame.get('width', 0)
+    height = frame.get('height', 0)
+    max_dim = max(width, height)
+    if max_dim <= _ICON_MAX_SIZE:
+        return 'icon'
+    if width >= 600:
+        return 'bg'
+    return 'img'
+
+
+def _should_prune_structure_layer(layer: dict) -> bool:
+    if not layer:
+        return True
+    if layer.get('visible') is False or layer.get('isVisible') is False:
+        return True
+    opacity = layer.get('opacity')
+    if opacity == 0:
+        return True
+    name = layer.get('name', '')
+    if name.startswith('__lanhu') or name.startswith('_annotation'):
+        return True
+    return False
+
+
+def _get_structure_layer_text(layer: dict) -> str:
+    text_info = layer.get('textInfo') or {}
+    if text_info.get('text'):
+        return str(text_info['text']).replace('\r', '\n')
+    for key in ('textContent', 'text', 'value', 'characters'):
+        value = layer.get(key)
+        if value and isinstance(value, str) and not value.startswith('{'):
+            return str(value)
+    style = layer.get('style')
+    if isinstance(style, dict):
+        if style.get('content'):
+            return str(style['content'])
+        for item in style.get('styles') or []:
+            if isinstance(item, dict) and item.get('content'):
+                return str(item['content'])
+    raw = json.dumps(layer, ensure_ascii=False)
+    match = re.search(r'"content"\s*:\s*"([^"]*)"', raw)
+    if match:
+        return match.group(1)
+    return ''
+
+
+def _process_structure_layer(layer: dict, is_figma: bool) -> Optional[dict]:
+    if _should_prune_structure_layer(layer):
+        return None
+
+    layer_type = (layer.get('type') or layer.get('ddsType') or layer.get('layerType') or '').lower()
+    name = layer.get('name', '')
+    frame = _get_sketch_layer_frame(layer)
+    frame_payload = frame if any(frame.values()) else None
+
+    if layer_type in ('textlayer', 'text') or layer.get('textInfo'):
+        text = _get_structure_layer_text(layer)
+        if text or layer_type in ('textlayer', 'text'):
+            node = {
+                'type': 'text',
+                'name': name,
+                'class': _build_structure_uno_class(layer),
+                'text': text,
+            }
+            if frame_payload:
+                node['frame'] = frame_payload
+            return node
+
+    if _is_structure_export_image(layer, is_figma):
+        img_type = _classify_structure_image_type(layer)
+        image_url = _get_structure_image_url(layer)
+        node = {
+            'type': 'icon' if img_type == 'icon' else 'image',
+            'name': name,
+            'class': _build_structure_uno_class(layer),
+        }
+        if frame_payload:
+            node['frame'] = frame_payload
+        if image_url:
+            node['imageRef'] = image_url
+        return node
+
+    child_layers = layer.get('layers') or layer.get('children') or []
+    if child_layers:
+        children = [_process_structure_layer(child, is_figma) for child in child_layers]
+        children = [child for child in children if child is not None]
+        if not children:
+            return None
+        if len(children) == 1 and not name:
+            return children[0]
+        node = {
+            'type': 'container',
+            'name': name,
+            'class': _build_structure_uno_class(layer),
+            'children': children,
+        }
+        if frame_payload:
+            node['frame'] = frame_payload
+        return node
+
+    if any(token in layer_type for token in ('shape', 'rect', 'oval')) or layer.get('fills') or layer.get('radius'):
+        node = {
+            'type': 'shape',
+            'name': name,
+            'class': _build_structure_uno_class(layer),
+        }
+        if frame_payload:
+            node['frame'] = frame_payload
+        return node
+
+    if frame_payload and frame_payload.get('width') and frame_payload.get('height'):
+        node = {
+            'type': 'shape',
+            'name': name,
+            'class': _build_structure_uno_class(layer),
+            'frame': frame_payload,
+        }
+        return node
+
+    return None
+
+
+def _get_sketch_root_layers(sketch_data: dict) -> list:
+    if sketch_data.get('layers'):
+        return sketch_data['layers']
+    artboard = sketch_data.get('artboard') or {}
+    if artboard.get('layers'):
+        return artboard['layers']
+    board = sketch_data.get('board') or {}
+    if board.get('layers'):
+        return board['layers']
+    if isinstance(sketch_data.get('info'), list):
+        return sketch_data['info']
+    return []
+
+
+def _parse_sketch_structure_tree(sketch_data: dict, is_figma: bool) -> list:
+    return [
+        node for node in (
+            _process_structure_layer(layer, is_figma)
+            for layer in _get_sketch_root_layers(sketch_data)
+        )
+        if node is not None
+    ]
+
+
+def _count_structure_nodes(nodes: list) -> int:
+    total = 0
+    for node in nodes or []:
+        total += 1
+        total += _count_structure_nodes(node.get('children') or [])
+    return total
+
+
+def build_design_structure_from_sketch(sketch_data: dict) -> dict:
+    """Build a compact design structure tree from Lanhu Sketch JSON."""
+    meta = sketch_data.get('meta') or {}
+    slice_scale = int(
+        sketch_data.get('sliceScale')
+        or sketch_data.get('exportScale')
+        or meta.get('sliceScale')
+        or 2
+    )
+    is_figma = (meta.get('host') or {}).get('name') == 'figma'
+    nodes = _parse_sketch_structure_tree(sketch_data, is_figma)
+    return {
+        'status': 'success',
+        'sliceScale': slice_scale,
+        'isFigma': is_figma,
+        'source': 'sketch_json',
+        'nodeCount': _count_structure_nodes(nodes),
+        'nodes': nodes,
+    }
+
+
+def _save_design_structure_file(project_id: str, image_id: str, structure_data: dict) -> str:
+    structures_dir = DATA_DIR / 'lanhu_designs' / project_id / 'structures'
+    structures_dir.mkdir(parents=True, exist_ok=True)
+    json_file_path = structures_dir / f"{image_id}.json"
+    with open(json_file_path, 'w', encoding='utf-8') as f:
+        json.dump(structure_data, f, ensure_ascii=False, indent=2)
+    return str(json_file_path)
+
+
+def _extract_all_text_contents_from_sketch(sketch_data: dict) -> list[str]:
+    """Extract unique visible text strings from raw Sketch/Figma JSON."""
+    raw = json.dumps(sketch_data, ensure_ascii=False)
+    found = re.findall(r'"content"\s*:\s*"([^"]*)"', raw)
+    for layer in _get_sketch_root_layers(sketch_data):
+        stack = [layer]
+        while stack:
+            item = stack.pop()
+            if not isinstance(item, dict):
+                continue
+            text = _get_structure_layer_text(item)
+            if text and not text.startswith('{'):
+                found.append(text)
+            for child in (item.get('layers') or item.get('children') or []):
+                stack.append(child)
+    unique = []
+    seen = set()
+    for text in found:
+        cleaned = text.strip()
+        if cleaned and cleaned not in seen:
+            seen.add(cleaned)
+            unique.append(cleaned)
+    return unique
+
+
+def _plain_text_from_blob(text: str) -> str:
+    if not text or not isinstance(text, str):
+        return ''
+    if not text.startswith('{') and not text.startswith("'"):
+        return text.strip()
+    match = re.search(r"'content':\s*'([^']*)'", text)
+    if match:
+        return match.group(1)
+    match = re.search(r'"content"\s*:\s*"([^"]*)"', text)
+    if match:
+        return match.group(1)
+    return ''
+
+
+def _clean_blueprint_node(node: dict, path: str = "") -> dict:
+    """Normalize structure node for AI consumption (plain text, stable keys)."""
+    name = node.get('name') or ''
+    node_path = f"{path}/{name}" if path else name
+    cleaned = {
+        'path': node_path,
+        'type': node.get('type'),
+        'name': name,
+    }
+    frame = node.get('frame')
+    if frame:
+        cleaned['frame'] = {
+            'x': frame.get('x'),
+            'y': frame.get('y'),
+            'width': frame.get('width'),
+            'height': frame.get('height'),
+        }
+    text = node.get('text')
+    if text:
+        plain = text if isinstance(text, str) and not text.startswith('{') else _plain_text_from_blob(str(text))
+        if not plain:
+            plain = _get_structure_layer_text(node)
+        if plain:
+            cleaned['text'] = plain
+    if node.get('imageRef'):
+        cleaned['imageRef'] = node['imageRef']
+    children = node.get('children') or []
+    if children:
+        cleaned['children'] = [
+            _clean_blueprint_node(child, node_path)
+            for child in children
+        ]
+    return cleaned
+
+
+def _flatten_blueprint_nodes(nodes: list, path: str = "") -> list[dict]:
+    flat = []
+    for node in nodes or []:
+        name = node.get('name') or ''
+        node_path = f"{path}/{name}" if path else name
+        item = {
+            'path': node_path,
+            'type': node.get('type'),
+            'name': name,
+        }
+        frame = node.get('frame') or {}
+        if frame:
+            item.update({
+                'x': frame.get('x'),
+                'y': frame.get('y'),
+                'width': frame.get('width'),
+                'height': frame.get('height'),
+            })
+        text = node.get('text')
+        if text:
+            plain = text if isinstance(text, str) and not text.startswith('{') else _plain_text_from_blob(str(text))
+            if plain:
+                item['text'] = plain
+        if node.get('imageRef'):
+            item['imageRef'] = node['imageRef']
+        flat.append(item)
+        flat.extend(_flatten_blueprint_nodes(node.get('children') or [], node_path))
+    return flat
+
+
+def _infer_canvas_size(sketch_data: dict, flat_elements: list[dict]) -> dict:
+    artboard = sketch_data.get('artboard') or {}
+    board = sketch_data.get('board') or {}
+    for source in (artboard, board):
+        width = source.get('width')
+        height = source.get('height')
+        if width and height:
+            return {'width': round(float(width), 2), 'height': round(float(height), 2)}
+    max_x = max_y = 0.0
+    for item in flat_elements:
+        x = float(item.get('x') or 0)
+        y = float(item.get('y') or 0)
+        w = float(item.get('width') or 0)
+        h = float(item.get('height') or 0)
+        max_x = max(max_x, x + w)
+        max_y = max(max_y, y + h)
+    if max_x and max_y:
+        return {'width': round(max_x, 2), 'height': round(max_y, 2)}
+    return {'width': None, 'height': None}
+
+
+def _build_wireframe_ascii(flat_elements: list[dict], canvas: dict) -> str:
+    """Compact top-to-bottom wireframe for AI quick scanning."""
+    width = canvas.get('width') or 375
+    lines = [f"Canvas {width}x{canvas.get('height') or '?'}", ""]
+    text_rows = [
+        e for e in flat_elements
+        if e.get('type') == 'text' and e.get('text') and e.get('y') is not None
+    ]
+    text_rows.sort(key=lambda e: (e.get('y', 0), e.get('x', 0)))
+    for row in text_rows:
+        label = str(row.get('text', '')).replace('\n', ' ')
+        if len(label) > 72:
+            label = label[:72] + '...'
+        lines.append(
+            f"y={row.get('y'):>6}  x={row.get('x'):>6}  "
+            f"{row.get('width')}x{row.get('height')}  {label}"
+        )
+    return '\n'.join(lines)
+
+
+def build_ai_design_blueprint(
+    sketch_data: dict,
+    design: Optional[dict] = None,
+    project_name: Optional[str] = None,
+    project_id: Optional[str] = None,
+    dds_schema_available: Optional[bool] = None,
+) -> dict:
+    """Build an AI-friendly design blueprint from Sketch JSON."""
+    structure = build_design_structure_from_sketch(sketch_data)
+    raw_nodes = structure.get('nodes') or []
+    layer_tree = [_clean_blueprint_node(node) for node in raw_nodes]
+    flat_elements = _flatten_blueprint_nodes(layer_tree)
+    all_texts = _extract_all_text_contents_from_sketch(sketch_data)
+    text_blocks = [
+        item for item in flat_elements
+        if item.get('type') == 'text' and item.get('text')
+    ]
+    image_blocks = [
+        item for item in flat_elements
+        if item.get('type') in ('image', 'icon') or item.get('imageRef')
+    ]
+    canvas = _infer_canvas_size(sketch_data, flat_elements)
+    if design:
+        if design.get('width'):
+            canvas['width'] = design['width']
+        if design.get('height'):
+            canvas['height'] = design['height']
+
+    return {
+        'version': '1.0',
+        'status': 'success',
+        'purpose': 'AI page generation reference — layer tree, coordinates, and text inventory',
+        'design': {
+            'id': (design or {}).get('id'),
+            'name': (design or {}).get('name'),
+            'index': (design or {}).get('index'),
+            'previewUrl': (design or {}).get('url'),
+            'sectorPaths': (design or {}).get('sector_paths') or [],
+            'canvas': canvas,
+        },
+        'project': {
+            'id': project_id,
+            'name': project_name,
+        },
+        'source': {
+            'type': structure.get('source'),
+            'isFigma': structure.get('isFigma'),
+            'sliceScale': structure.get('sliceScale'),
+            'ddsSchemaAvailable': dds_schema_available,
+        },
+        'summary': {
+            'nodeCount': structure.get('nodeCount'),
+            'flatElementCount': len(flat_elements),
+            'textBlockCount': len(text_blocks),
+            'imageBlockCount': len(image_blocks),
+            'allTexts': all_texts,
+        },
+        'layerTree': layer_tree,
+        'flatElements': flat_elements,
+        'textBlocks': text_blocks,
+        'imageBlocks': image_blocks,
+        'wireframeAscii': _build_wireframe_ascii(flat_elements, canvas),
+    }
+
+
+def _save_design_blueprint_file(project_id: str, image_id: str, blueprint: dict) -> dict:
+    blueprint_dir = DATA_DIR / 'lanhu_designs' / project_id / 'blueprints'
+    blueprint_dir.mkdir(parents=True, exist_ok=True)
+    safe_name = re.sub(r'[^\w\u4e00-\u9fff\-]+', '_', (blueprint.get('design') or {}).get('name') or 'design')
+    blueprint_path = blueprint_dir / f"{image_id}_{safe_name}.blueprint.json"
+    tree_path = blueprint_dir / f"{image_id}_{safe_name}.layer-tree.json"
+    wireframe_path = blueprint_dir / f"{image_id}_{safe_name}.wireframe.txt"
+
+    with open(blueprint_path, 'w', encoding='utf-8') as f:
+        json.dump(blueprint, f, ensure_ascii=False, indent=2)
+
+    with open(tree_path, 'w', encoding='utf-8') as f:
+        json.dump({
+            'design': blueprint.get('design'),
+            'layerTree': blueprint.get('layerTree'),
+        }, f, ensure_ascii=False, indent=2)
+
+    with open(wireframe_path, 'w', encoding='utf-8') as f:
+        f.write(blueprint.get('wireframeAscii') or '')
+
+    return {
+        'blueprintJson': str(blueprint_path),
+        'layerTreeJson': str(tree_path),
+        'wireframeTxt': str(wireframe_path),
+    }
+
+
+async def _resolve_target_design(
+    extractor: 'LanhuExtractor',
+    url: str,
+    image_id: Optional[str],
+    design_name: Optional[str],
+) -> tuple[Optional[str], Optional[dict], dict]:
+    """Resolve image_id and design dict; may return designs list payload."""
+    params = extractor.parse_url(url)
+    target_image_id = image_id or params.get('doc_id')
+    designs_data = None
+    target_design = None
+
+    if not target_image_id or design_name:
+        designs_data = await _get_designs_internal(extractor, url)
+        if designs_data.get('status') != 'success':
+            return None, None, designs_data
+
+    if design_name and designs_data:
+        for design in designs_data['designs']:
+            if design['name'] == design_name.strip():
+                target_design = design
+                target_image_id = design['id']
+                break
+        if not target_design:
+            return None, None, {
+                'status': 'error',
+                'message': f"Design not found: {design_name}",
+            }
+
+    if target_image_id and not target_design and designs_data:
+        target_design = next(
+            (d for d in designs_data['designs'] if d['id'] == target_image_id),
+            None,
+        )
+
+    if not target_image_id and designs_data:
+        return None, None, {
+            'status': 'need_image_id',
+            'message': 'No image_id specified. Choose a design and call again with image_id or design_name.',
+            'projectName': designs_data.get('project_name'),
+            'designs': [
+                {
+                    'index': d['index'],
+                    'id': d['id'],
+                    'name': d['name'],
+                    'size': f"{d['width']}x{d['height']}",
+                    'sector_paths': d.get('sector_paths', []),
+                }
+                for d in designs_data['designs']
+            ],
+        }
+
+    return target_image_id, target_design, params
+
+
 def _oc_to_css(oc_code: str) -> str:
     """将蓝湖标注面板的 Objective-C 代码转换为 CSS 属性。"""
     import re
@@ -4844,6 +5521,76 @@ async def lanhu_get_ai_analyze_page_result(
         await extractor.close()
 
 
+def _normalize_design_sectors(sectors: List[dict]) -> tuple[List[dict], dict[str, List[dict]]]:
+    """Normalize Lanhu project_sectors and build image_id -> sectors mapping."""
+    sector_by_id = {}
+    for sector in sectors or []:
+        sector_id = sector.get('id')
+        if sector_id:
+            sector_by_id[sector_id] = sector
+
+    sector_path_cache = {}
+
+    def sector_display_name(sector_id: str) -> str:
+        sector = sector_by_id.get(sector_id, {})
+        return sector.get('name') or sector_id
+
+    def build_sector_path(sector_id: str, trail: Optional[set[str]] = None) -> str:
+        if not sector_id:
+            return ""
+        if sector_id in sector_path_cache:
+            return sector_path_cache[sector_id]
+
+        parent_id = sector_by_id.get(sector_id, {}).get('parent_id') or ""
+        trail = trail or set()
+
+        if sector_id in trail:
+            path = sector_display_name(sector_id)
+        elif parent_id and parent_id in sector_by_id:
+            parent_path = build_sector_path(parent_id, trail | {sector_id})
+            name = sector_display_name(sector_id)
+            path = f"{parent_path}/{name}" if parent_path else name
+        else:
+            path = sector_display_name(sector_id)
+
+        sector_path_cache[sector_id] = path
+        return path
+
+    normalized_sectors = []
+    image_sector_map: dict[str, List[dict]] = {}
+
+    for sector in sectors or []:
+        sector_id = sector.get('id')
+        if not sector_id:
+            continue
+
+        display_name = sector_display_name(sector_id)
+        normalized_sector = {
+            'id': sector_id,
+            'parent_id': sector.get('parent_id') or None,
+            'name': display_name,
+            'path': build_sector_path(sector_id),
+            'order': sector.get('order', 0),
+            'image_count': len(sector.get('images') or []),
+        }
+        normalized_sectors.append(normalized_sector)
+
+        design_sector = {
+            'id': sector_id,
+            'name': display_name,
+            'path': normalized_sector['path'],
+        }
+
+        for image_id in sector.get('images') or []:
+            if not image_id:
+                continue
+            sectors_for_image = image_sector_map.setdefault(image_id, [])
+            if not any(existing['id'] == sector_id for existing in sectors_for_image):
+                sectors_for_image.append(dict(design_sector))
+
+    return normalized_sectors, image_sector_map
+
+
 async def _get_designs_internal(extractor: LanhuExtractor, url: str) -> dict:
     """内部函数：获取设计图列表"""
     # 解析URL获取参数
@@ -4856,6 +5603,28 @@ async def _get_designs_internal(extractor: LanhuExtractor, url: str) -> dict:
         f"&team_id={params['team_id']}"
         f"&dds_status=1&position=1&show_cb_src=1&comment=1"
     )
+
+    sector_list = []
+    image_sector_map = {}
+    sector_warning = None
+
+    try:
+        sector_api_url = (
+            f"https://lanhuapp.com/api/project/project_sectors"
+            f"?project_id={params['project_id']}"
+        )
+        sector_response = await extractor.client.get(sector_api_url)
+        sector_response.raise_for_status()
+        sector_data = sector_response.json()
+
+        if sector_data.get('code') == '00000':
+            sector_list, image_sector_map = _normalize_design_sectors(
+                sector_data.get('data', {}).get('sectors', [])
+            )
+        else:
+            sector_warning = sector_data.get('msg', 'Unknown error')
+    except Exception as e:
+        sector_warning = str(e)
 
     # 发送请求
     response = await extractor.client.get(api_url)
@@ -4874,6 +5643,7 @@ async def _get_designs_internal(extractor: LanhuExtractor, url: str) -> dict:
 
     design_list = []
     for idx, img in enumerate(images, 1):
+        design_sectors = image_sector_map.get(img.get('id'), [])
         design_list.append({
             'index': idx,
             'id': img.get('id'),
@@ -4882,15 +5652,26 @@ async def _get_designs_internal(extractor: LanhuExtractor, url: str) -> dict:
             'height': img.get('height'),
             'url': img.get('url'),
             'has_comment': img.get('has_comment', False),
-            'update_time': img.get('update_time')
+            'update_time': img.get('update_time'),
+            'sectors': design_sectors,
+            'sector_names': [sector['name'] for sector in design_sectors],
+            'sector_paths': [sector['path'] for sector in design_sectors],
         })
 
-    return {
+    result = {
         'status': 'success',
         'project_name': project_data.get('name'),
+        'total_sectors': len(sector_list),
+        'ungrouped_design_count': sum(1 for design in design_list if not design.get('sectors')),
+        'sectors': sector_list,
         'total_designs': len(design_list),
         'designs': design_list
     }
+
+    if sector_warning:
+        result['sector_warning'] = f"Failed to load project sectors: {sector_warning}"
+
+    return result
 
 
 @mcp.tool()
@@ -4906,6 +5687,7 @@ async def lanhu_get_designs(
     DO NOT USE for: 切图, 图标, 素材 (use lanhu_get_design_slices instead)
     
     Purpose: Get list of UI design images from designers. Must call this BEFORE lanhu_get_ai_analyze_design_result.
+    Related: If DDS/HTML export is off, use lanhu_get_design_structure for Sketch JSON layer tree.
     
     Returns:
         Design image list and project metadata
@@ -4938,6 +5720,175 @@ async def lanhu_get_designs(
 
 
 @mcp.tool()
+async def lanhu_get_design_structure(
+    url: Annotated[str, "Lanhu URL with tid & pid. Example: https://lanhuapp.com/web/#/item/project/stage?tid=xxx&pid=xxx. Optional image_id in URL hash."],
+    image_id: Annotated[Optional[str], "Design image ID. If omitted, uses image_id from URL or returns the design list for selection."] = None,
+    design_name: Annotated[Optional[str], "Design name from lanhu_get_designs. Alternative to image_id."] = None,
+    ctx: Context = None,
+) -> str:
+    """
+    [UI Design] Get cleaned structured layer tree from Sketch JSON (works without DDS/HTML export).
+
+    USE THIS WHEN user says: 设计结构, 图层树, 结构化数据, UnoCSS, 设计稿结构, store_schema_revise 失败
+    DO NOT USE for: PRD/Axure requirements (use lanhu_get_ai_analyze_page_result)
+    DO NOT USE for: full visual+HTML pipeline (use lanhu_get_ai_analyze_design_result)
+
+    When Lanhu "转代码/HTML" or DDS Schema is unavailable, this tool still returns a compact
+    node tree (text/image/container/shape) with frame positions and utility-class hints.
+    """
+    extractor = LanhuExtractor()
+    try:
+        user_name, user_role = get_user_info(ctx) if ctx else ('匿名', '未知')
+        project_id = get_project_id_from_url(url)
+        if project_id:
+            store = MessageStore(project_id)
+            store.record_collaborator(user_name, user_role)
+
+        params = extractor.parse_url(url)
+        target_image_id = image_id or params.get('doc_id')
+
+        if not target_image_id and design_name:
+            designs_data = await _get_designs_internal(extractor, url)
+            if designs_data['status'] != 'success':
+                return json.dumps({
+                    'status': 'error',
+                    'message': designs_data.get('message', 'Unknown error'),
+                }, ensure_ascii=False, indent=2)
+            for design in designs_data['designs']:
+                if design['name'] == design_name.strip():
+                    target_image_id = design['id']
+                    break
+            if not target_image_id:
+                return json.dumps({
+                    'status': 'error',
+                    'message': f"Design not found: {design_name}",
+                }, ensure_ascii=False, indent=2)
+
+        if not target_image_id:
+            designs_data = await _get_designs_internal(extractor, url)
+            if designs_data['status'] != 'success':
+                return json.dumps({
+                    'status': 'error',
+                    'message': designs_data.get('message', 'Unknown error'),
+                }, ensure_ascii=False, indent=2)
+            return json.dumps({
+                'status': 'need_image_id',
+                'message': 'No image_id specified. Choose a design and call again with image_id or design_name.',
+                'hint': 'This tool reads Sketch JSON and does not require Lanhu HTML/DDS export.',
+                'projectName': designs_data['project_name'],
+                'designs': [
+                    {
+                        'index': design['index'],
+                        'id': design['id'],
+                        'name': design['name'],
+                        'size': f"{design['width']}x{design['height']}",
+                        'sector_paths': design.get('sector_paths', []),
+                    }
+                    for design in designs_data['designs']
+                ],
+            }, ensure_ascii=False, indent=2)
+
+        sketch_data = await extractor.get_sketch_json(
+            target_image_id,
+            params['team_id'],
+            params['project_id'],
+        )
+        result_data = build_design_structure_from_sketch(sketch_data)
+        result_data['imageId'] = target_image_id
+        result_data['savedTo'] = _save_design_structure_file(
+            params['project_id'],
+            target_image_id,
+            result_data,
+        )
+        return json.dumps(result_data, ensure_ascii=False, indent=2)
+    except Exception as e:
+        return json.dumps({
+            'status': 'error',
+            'message': f"Failed to get design structure: {str(e)}",
+            'hint': 'Sketch JSON is still required. Ensure the design was uploaded via Sketch/Figma plugin.',
+        }, ensure_ascii=False, indent=2)
+    finally:
+        await extractor.close()
+
+
+@mcp.tool()
+async def lanhu_export_design_blueprint(
+    url: Annotated[str, "Lanhu URL with tid & pid. Include image_id in URL or pass image_id/design_name."],
+    image_id: Annotated[Optional[str], "Design image ID"] = None,
+    design_name: Annotated[Optional[str], "Design name from lanhu_get_designs"] = None,
+    ctx: Context = None,
+) -> str:
+    """
+    [UI Design] Export AI-friendly design blueprint JSON (layer tree + text inventory + wireframe).
+
+    USE THIS WHEN user says: 导出图层树, 设计蓝图, AI生成页面, 下载结构JSON, 页面结构示意图
+    DO NOT USE for: PRD/Axure (use lanhu_get_pages / lanhu_get_ai_analyze_page_result)
+
+    Downloads to data/lanhu_designs/{project_id}/blueprints/:
+      - *.blueprint.json   — full AI reference (layerTree, flatElements, allTexts, wireframe)
+      - *.layer-tree.json  — layer tree only
+      - *.wireframe.txt    — top-to-bottom text layout scan
+    """
+    extractor = LanhuExtractor()
+    try:
+        user_name, user_role = get_user_info(ctx) if ctx else ('匿名', '未知')
+        project_id = get_project_id_from_url(url)
+        if project_id:
+            store = MessageStore(project_id)
+            store.record_collaborator(user_name, user_role)
+
+        target_image_id, target_design, third = await _resolve_target_design(
+            extractor, url, image_id, design_name
+        )
+        if not target_image_id:
+            return json.dumps(third, ensure_ascii=False, indent=2)
+
+        params = third
+        project_id = params['project_id']
+        designs_data = None
+        if not target_design:
+            designs_data = await _get_designs_internal(extractor, url)
+            if designs_data.get('status') == 'success':
+                target_design = next(
+                    (d for d in designs_data['designs'] if d['id'] == target_image_id),
+                    None,
+                )
+
+        sketch_data = await extractor.get_sketch_json(
+            target_image_id, params['team_id'], project_id
+        )
+
+        dds_ok = True
+        try:
+            await extractor.get_design_schema_json(
+                target_image_id, params['team_id'], project_id
+            )
+        except Exception:
+            dds_ok = False
+
+        blueprint = build_ai_design_blueprint(
+            sketch_data,
+            design=target_design,
+            project_name=(designs_data or {}).get('project_name'),
+            project_id=project_id,
+            dds_schema_available=dds_ok,
+        )
+        blueprint['files'] = _save_design_blueprint_file(project_id, target_image_id, blueprint)
+        blueprint['usageHint'] = (
+            'Feed blueprint.json to AI for page generation. Use layerTree for hierarchy, '
+            'flatElements/textBlocks for positions, summary.allTexts for copy, wireframeAscii for layout order.'
+        )
+        return json.dumps(blueprint, ensure_ascii=False, indent=2)
+    except Exception as e:
+        return json.dumps({
+            'status': 'error',
+            'message': f"Failed to export design blueprint: {str(e)}",
+        }, ensure_ascii=False, indent=2)
+    finally:
+        await extractor.close()
+
+
+@mcp.tool()
 async def lanhu_get_ai_analyze_design_result(
         url: Annotated[str, "Lanhu URL WITHOUT docId (indicates UI design project). Example: https://lanhuapp.com/web/#/item/project/stage?tid=xxx&pid=xxx"],
         design_names: Annotated[Union[str, List[str]], "Design name(s) or index number(s). 'all' = all designs. Number (e.g. 6) = the 6th item in lanhu_get_designs list (by 'index' field), NOT by name prefix. Exact name (e.g. '6_friend页_挂件墙') = match by full name. Get names/index from lanhu_get_designs first."],
@@ -4949,6 +5900,8 @@ async def lanhu_get_ai_analyze_design_result(
     USE THIS WHEN user says: UI设计图, 设计图, 设计稿, 视觉设计, UI稿, 看看设计, 帮我看设计图, 设计评审
     DO NOT USE for: 需求文档, PRD, 原型, 交互稿, Axure (use lanhu_get_ai_analyze_page_result instead)
     DO NOT USE for: 切图, 图标, 素材 (use lanhu_get_design_slices instead)
+    FALLBACK: If DDS Schema/HTML export is unavailable, this tool auto-falls back to Sketch JSON
+    (annotation HTML + design tokens). For AI page generation, use lanhu_export_design_blueprint.
     
     WORKFLOW: First call lanhu_get_designs to get design list, then call this to analyze specific designs.
     
@@ -5126,7 +6079,14 @@ async def lanhu_get_ai_analyze_design_result(
                         break
 
         if not target_designs:
-            available_names = [d['name'] for d in designs]
+            available_names = []
+            for design in designs:
+                if design.get('sector_paths'):
+                    available_names.append(
+                        f"{design['name']} [{', '.join(design['sector_paths'])}]"
+                    )
+                else:
+                    available_names.append(design['name'])
             return [
                 f"⚠️ No matching design found\n\nAvailable designs:\n" + "\n".join(f"  • {name}" for name in available_names)]
 
@@ -5159,12 +6119,16 @@ async def lanhu_get_ai_analyze_design_result(
                     'success': True,
                     'design_name': design['name'],
                     'design_id': design['id'],
+                    'sectors': design.get('sectors', []),
+                    'sector_paths': design.get('sector_paths', []),
                     'screenshot_path': str(img_filepath)
                 })
             except Exception as e:
                 image_results.append({
                     'success': False,
                     'design_name': design['name'],
+                    'sectors': design.get('sectors', []),
+                    'sector_paths': design.get('sector_paths', []),
                     'error': str(e)
                 })
             
@@ -5238,6 +6202,12 @@ async def lanhu_get_ai_analyze_design_result(
                     fallback_img_mapping['./assets/designs/design.png'] = _design_img_url
                     fallback_html = minify_html(fallback_html)
                     fallback_annotations = _extract_full_annotations_from_sketch(sketch_json, _design_scale)
+                    structure_data = build_design_structure_from_sketch(sketch_json)
+                    structure_path = _save_design_structure_file(
+                        params['project_id'],
+                        design['id'],
+                        structure_data,
+                    )
 
                     for hr in html_results:
                         if hr.get('design_name') == design['name'] and not hr.get('success'):
@@ -5245,8 +6215,25 @@ async def lanhu_get_ai_analyze_design_result(
                             hr['sketch_annotations'] = fallback_annotations
                             hr['image_url_mapping'] = fallback_img_mapping
                             hr['layer_css_annotations'] = fallback_layer_annots
+                            hr['structure_nodes'] = structure_data.get('nodes', [])
+                            hr['structure_node_count'] = structure_data.get('nodeCount', 0)
+                            hr['structure_path'] = structure_path
+                            hr['schema_fallback'] = True
                             if design_tokens:
                                 hr['design_tokens'] = design_tokens
+                            break
+                else:
+                    structure_data = build_design_structure_from_sketch(sketch_json)
+                    structure_path = _save_design_structure_file(
+                        params['project_id'],
+                        design['id'],
+                        structure_data,
+                    )
+                    for hr in html_results:
+                        if hr.get('design_name') == design['name'] and hr.get('success'):
+                            hr['structure_nodes'] = structure_data.get('nodes', [])
+                            hr['structure_node_count'] = structure_data.get('nodeCount', 0)
+                            hr['structure_path'] = structure_path
                             break
             except Exception:
                 pass
@@ -5258,13 +6245,20 @@ async def lanhu_get_ai_analyze_design_result(
         html_success_count = len([r for r in html_results if r['success']])
         html_total_count = len(html_results)
         sketch_fallback_count = len([r for r in html_results if not r['success'] and r.get('sketch_html')])
+        structure_count = len([r for r in html_results if r.get('structure_path')])
 
         summary_text = f"📊 Design Analysis Results\n"
         summary_text += f"📁 Project: {designs_data['project_name']}\n"
         summary_text += f"✓ {len([r for r in image_results if r['success']])}/{len(image_results)} images downloaded\n"
         summary_text += f"✓ {html_success_count}/{html_total_count} HTML codes generated\n"
         if sketch_fallback_count > 0:
-            summary_text += f"✓ {sketch_fallback_count} design(s) using Sketch annotation fallback (标注模式)\n"
+            summary_text += (
+                f"✓ {sketch_fallback_count} design(s) using Sketch annotation fallback (标注模式)\n"
+                f"  ℹ️ DDS Schema unavailable — structured layer tree extracted from Sketch JSON\n"
+                f"  ℹ️ For standalone structure export, call lanhu_get_design_structure\n"
+            )
+        if structure_count > 0:
+            summary_text += f"✓ {structure_count} design(s) include structured layer trees (Sketch JSON)\n"
         summary_text += "\n"
 
         # Show design list with both image and HTML info（每条加显式标题便于多图时对应）
@@ -5357,8 +6351,15 @@ async def lanhu_get_ai_analyze_design_result(
         
         for idx, img_r in enumerate(success_image_results, 1):
             summary_text += f"\n--- 设计图 {idx}：{img_r['design_name']} ---\n"
+            if img_r.get('sector_paths'):
+                summary_text += f"   🗂️ 所属分组: {'；'.join(img_r['sector_paths'])}\n"
 
             html_r = success_html_results.get(img_r['design_name'])
+            if html_r and html_r.get('structure_path'):
+                summary_text += (
+                    f"   📐 结构化图层树: {html_r.get('structure_node_count', 0)} nodes"
+                    f" → {html_r['structure_path']}\n"
+                )
             if html_r:
                 summary_text += f"   📄 完整代码（图片已替换为本地路径）:\n"
                 summary_text += f"   ```html\n"
@@ -5387,6 +6388,12 @@ async def lanhu_get_ai_analyze_design_result(
                 if failed_r and (failed_r.get('sketch_html') or failed_r.get('sketch_annotations')):
                     summary_text += f"\n   ⚠️ DDS Schema 不可用（{failed_r.get('error', '未知')}），"
                     summary_text += f"已使用「设计原图底图 + 真实文字 + CSS 标注」方案生成 HTML。\n"
+                    if failed_r.get('structure_path'):
+                        summary_text += (
+                            f"   📐 结构化图层树: {failed_r.get('structure_node_count', 0)} nodes"
+                            f" → {failed_r['structure_path']}\n"
+                            f"   💡 也可单独调用 lanhu_get_design_structure 获取 JSON 图层树\n"
+                        )
                     summary_text += f"   渲染策略：\n"
                     summary_text += f"   - 设计原图作为 .design 容器的 background-image（一张图覆盖所有视觉效果）\n"
                     summary_text += f"   - 文字图层：渲染真实文本（可选中/可编辑）+ font/color/size 属性\n"
@@ -5456,6 +6463,10 @@ async def lanhu_get_ai_analyze_design_result(
             summary_text += f"\n⚠️ Failed to generate {len(failed_html_results)} HTML codes (no fallback available):\n"
             for r in failed_html_results:
                 summary_text += f"  ✗ {r['design_name']}: {r.get('error', 'Unknown')}\n"
+            summary_text += (
+                "  💡 If error mentions store_schema_revise / 版本数据不存在, call "
+                "lanhu_get_design_structure(url, image_id=...) to get Sketch JSON layer tree\n"
+            )
 
         content.append(summary_text)
 
