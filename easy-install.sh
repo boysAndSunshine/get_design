@@ -115,8 +115,18 @@ echo "正在安装 Playwright 浏览器..."
 echo -e "${YELLOW}（首次安装需要下载 Chromium，可能需要 1-2 分钟）${NC}"
 playwright install chromium
 
+echo "正在验证 Cookie 抓取脚本依赖..."
+if ! python -c "import httpx; from playwright.async_api import async_playwright" 2>/dev/null; then
+    echo -e "${RED}❌ httpx 或 playwright 未正确安装${NC}"
+    echo "请执行: pip install -r requirements.txt && playwright install chromium"
+    exit 1
+fi
+echo -e "${GREEN}✅ Cookie 抓取依赖就绪（httpx / playwright）${NC}"
+
 echo ""
 echo -e "${GREEN}🎉 依赖安装完成！${NC}"
+echo -e "${YELLOW}提示: 获取 Cookie 请使用 venv 内 Python:${NC}"
+echo -e "  ${BOLD}bash fetch-cookie.sh${NC}  或  ${BOLD}source venv/bin/activate && python lanhu_cookie_auth.py${NC}"
 sleep 1
 
 # ============================================
