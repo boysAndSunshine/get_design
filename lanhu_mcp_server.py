@@ -33,9 +33,28 @@ except ImportError:
 # 东八区时区（北京时间）
 CHINA_TZ = timezone(timedelta(hours=8))
 from urllib.parse import urlparse
+from email.utils import parsedate_to_datetime
 
 # 元数据缓存配置（基于版本号的永久缓存）
 _metadata_cache = {}  # {cache_key: {'data': {...}, 'version_id': str}}
+
+
+def _format_lanhu_rfc2822(value: Optional[str]) -> Optional[str]:
+    """把蓝湖 /api/project/product_documents 等端点返回的 RFC 2822 时间
+    (如 'Fri, 09 Jan 2026 10:07:29 GMT') 转成 '%Y-%m-%d %H:%M:%S' 中国时区字符串。
+
+    与 _fetch_metadata_from_url 中的 ISO8601 处理风格保持一致。
+    失败时原样返回，None 返回 None。
+    """
+    if not value:
+        return None
+    try:
+        dt = parsedate_to_datetime(value)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone(CHINA_TZ).strftime('%Y-%m-%d %H:%M:%S')
+    except Exception:
+        return value
 
 import httpx
 from fastmcp import Context
@@ -2135,6 +2154,7 @@ def get_user_info(ctx: Context) -> tuple:
     从URL query参数获取用户信息
     
     MCP连接URL格式：http://xxx:port/mcp?role=后端&name=张三
+    stdio模式可通过 LANHU_USER_NAME 和 LANHU_USER_ROLE 环境变量获取
     """
     try:
         # 使用 FastMCP 提供的 get_http_request 获取当前请求
@@ -2147,7 +2167,7 @@ def get_user_info(ctx: Context) -> tuple:
         return name, role
     except Exception:
         pass
-    return '匿名', '未知'
+    return os.getenv('LANHU_USER_NAME', '匿名'), os.getenv('LANHU_USER_ROLE', '未知')
 
 
 def _clean_message_dict(msg: dict, current_user_name: str = None) -> dict:
@@ -2387,6 +2407,56 @@ class LanhuExtractor:
             raise Exception(f"API Error: {data.get('msg')} (code={code})")
 
         return data.get('data') or data.get('result', {})
+
+    async def list_product_documents(self, team_id: str, project_id: str) -> dict:
+        """获取项目下的所有产品文档(PRD/原型)列表。
+
+        调用端点: GET /api/project/product_documents?team_id=xxx&project_id=xxx
+
+        返回精简后的结构，仅保留对 AI 有意义的字段、规范化时间格式，
+        并为每个文档预拼好 `doc_url`，便于直接喂给 lanhu_get_pages。
+        """
+        api_url = f"{BASE_URL}/api/project/product_documents"
+        params = {'team_id': team_id, 'project_id': project_id}
+
+        response = await self.client.get(api_url, params=params)
+        response.raise_for_status()
+
+        data = response.json()
+        code = data.get('code')
+        success = (code == 0 or code == '0' or code == '00000')
+
+        if not success:
+            raise Exception(f"API Error: {data.get('msg')} (code={code})")
+
+        result = data.get('data') or data.get('result') or {}
+
+        documents = []
+        for item in result.get('resources') or []:
+            doc_id = item.get('id')
+            if not doc_id:
+                continue
+            documents.append({
+                'doc_id': doc_id,
+                'name': item.get('name'),
+                'type': item.get('type', 'axure'),
+                'last_version_num': item.get('last_version_num'),
+                'latest_version': item.get('latest_version'),
+                'create_time': _format_lanhu_rfc2822(item.get('create_time')),
+                'update_time': _format_lanhu_rfc2822(item.get('update_time')),
+                'doc_url': (
+                    f"{BASE_URL}/web/#/item/project/product"
+                    f"?tid={team_id}&pid={project_id}&docId={doc_id}"
+                ),
+            })
+
+        return {
+            'default_group_id': result.get('default_group_id'),
+            'doc_can_download': result.get('doc_can_download'),
+            'need_group': result.get('need_group'),
+            'total': len(documents),
+            'documents': documents,
+        }
 
     def _get_cache_meta_path(self, output_dir: Path) -> Path:
         """获取缓存元数据文件路径"""
@@ -2847,6 +2917,50 @@ class LanhuExtractor:
             'android_xxxhdpi': make_url(stored_w, stored_h),               # = 原图
         }
 
+    @staticmethod
+    def _build_ps_scale_urls(image_url: str, base_w: float, base_h: float) -> dict:
+        """
+        生成 Photoshop 稿切图的多倍图下载 URL。
+
+        PS 稿里 layer.width/height 对应蓝湖切图面板的 @2x 像素尺寸，
+        也就是 iOS @2x / Android xhdpi。以 40x40 为例：
+        1x/mdpi = 20x20, 2x/xhdpi = 40x40, 3x/xxhdpi = 60x60。
+        """
+        if not image_url or not base_w or not base_h:
+            return {}
+
+        bw = max(1, int(round(base_w)))
+        bh = max(1, int(round(base_h)))
+
+        def js_round(v: float) -> int:
+            """模拟 JavaScript Math.round（.5 向上取整）"""
+            import math
+            return math.floor(v + 0.5)
+
+        def make_url(w: int, h: int) -> str:
+            w, h = max(1, w), max(1, h)
+            return f"{image_url}?x-oss-process=image/resize,w_{w},h_{h}/format,png"
+
+        one_x_w = bw / 2
+        one_x_h = bh / 2
+
+        return {
+            # Web / 通用
+            '1x': make_url(js_round(one_x_w), js_round(one_x_h)),
+            '2x': make_url(bw, bh),
+            '3x': make_url(js_round(one_x_w * 3), js_round(one_x_h * 3)),
+            # iOS
+            'ios_1x': make_url(js_round(one_x_w), js_round(one_x_h)),
+            'ios_2x': make_url(bw, bh),
+            'ios_3x': make_url(js_round(one_x_w * 3), js_round(one_x_h * 3)),
+            # Android
+            'android_mdpi': make_url(js_round(one_x_w), js_round(one_x_h)),
+            'android_hdpi': make_url(js_round(one_x_w * 1.5), js_round(one_x_h * 1.5)),
+            'android_xhdpi': make_url(bw, bh),
+            'android_xxhdpi': make_url(js_round(one_x_w * 3), js_round(one_x_h * 3)),
+            'android_xxxhdpi': make_url(js_round(one_x_w * 4), js_round(one_x_h * 4)),
+        }
+
     async def get_design_slices_info(self, image_id: str, team_id: str, project_id: str,
                                      include_metadata: bool = True) -> dict:
         """
@@ -3128,6 +3242,101 @@ class LanhuExtractor:
         elif sketch_data.get('info'):
             for item in sketch_data['info']:
                 find_slices(item)
+
+        # Photoshop：蓝湖在根节点 type=ps，切图登记在 assets[]（isSlice），
+        # 实际 PNG/SVG 地址在对应 id 的图层 images.png_xxxhd / images.svg（与 convert_sketch_to_html 一致）
+        if str(sketch_data.get('type') or '').lower() == 'ps':
+            by_id: dict = {}
+
+            def _index_ps(obj):
+                if not isinstance(obj, dict):
+                    return
+                oid = obj.get('id')
+                if oid is not None:
+                    by_id[oid] = obj
+                for k in ('layers', 'children'):
+                    for c in (obj.get(k) or []):
+                        if isinstance(c, dict):
+                            _index_ps(c)
+
+            board = sketch_data.get('board')
+            if isinstance(board, dict):
+                _index_ps(board)
+            for sec in sketch_data.get('info') or []:
+                if isinstance(sec, dict):
+                    _index_ps(sec)
+
+            existing_ids = {s.get('id') for s in slices}
+
+            for asset in sketch_data.get('assets') or []:
+                if not isinstance(asset, dict) or not asset.get('isSlice'):
+                    continue
+                lid = asset.get('id')
+                if lid is None or lid in existing_ids:
+                    continue
+                layer = by_id.get(lid)
+                if not isinstance(layer, dict):
+                    continue
+                imgs = layer.get('images') or {}
+                download_url = imgs.get('png_xxxhd') or imgs.get('svg')
+                if not download_url:
+                    continue
+
+                lw_raw = float(layer.get('width') or 0)
+                lh_raw = float(layer.get('height') or 0)
+                if lw_raw <= 0 or lh_raw <= 0:
+                    bb = asset.get('bounds') or {}
+                    lw_raw = float(bb.get('right', 0)) - float(bb.get('left', 0))
+                    lh_raw = float(bb.get('bottom', 0)) - float(bb.get('top', 0))
+                base_w = max(1.0, lw_raw)
+                base_h = max(1.0, lh_raw)
+                logical_w = max(1.0, base_w / 2)
+                logical_h = max(1.0, base_h / 2)
+
+                disp_name = asset.get('name') or layer.get('name') or 'slice'
+                size_str = f"{int(round(base_w))}x{int(round(base_h))}"
+                slice_info = {
+                    'id': lid,
+                    'name': disp_name,
+                    'type': layer.get('type') or 'ps-slice',
+                    'download_url': download_url,
+                    'size': size_str,
+                    'format': 'png' if imgs.get('png_xxxhd') else 'svg',
+                }
+                if imgs.get('png_xxxhd') and imgs.get('svg'):
+                    slice_info['svg_url'] = imgs['svg']
+
+                if 'left' in layer and 'top' in layer:
+                    slice_info['position'] = {
+                        'x': int(round(float(layer.get('left', 0)))),
+                        'y': int(round(float(layer.get('top', 0)))),
+                    }
+
+                slice_info['layer_path'] = disp_name
+
+                if include_metadata:
+                    md = {'source': 'photoshop', 'asset_id': lid}
+                    if asset.get('scaleType') is not None:
+                        md['scaleType'] = asset.get('scaleType')
+                    slice_info['metadata'] = md
+
+                if imgs.get('png_xxxhd'):
+                    scale_urls = self._build_ps_scale_urls(download_url, base_w, base_h)
+                    if scale_urls:
+                        slice_info['scale_urls'] = scale_urls
+                    slice_info['logical_size'] = {
+                        'width': int(round(logical_w)),
+                        'height': int(round(logical_h)),
+                        'note': '1x logical px; PS slice base px equals iOS @2x / Android xhdpi',
+                    }
+                    slice_info['base_size'] = {
+                        'width': int(round(base_w)),
+                        'height': int(round(base_h)),
+                        'note': 'PS slice base px; equals iOS @2x / Android xhdpi',
+                    }
+
+                slices.append(slice_info)
+                existing_ids.add(lid)
 
         return {
             'design_id': image_id,
@@ -3786,6 +3995,35 @@ def _get_analysis_mode_options_by_role(user_role: str) -> str:
 
 {tester_option.replace('2️⃣', '3️⃣')}
 """
+
+
+@mcp.tool()
+async def lanhu_list_product_documents(
+    url: Annotated[str, "Lanhu project URL. Example: https://lanhuapp.com/web/#/item/project/product?tid=xxx&pid=xxx (docId optional, will be ignored). Required params: tid, pid. If you have an invite link, use lanhu_resolve_invite_link first!"],
+    ctx: Context = None
+) -> dict:
+    """
+    [PRD/Requirement Document Discovery] List all product documents (PRD/prototype) in a Lanhu project.
+
+    USE THIS WHEN user says: 有哪些需求文档, 列出项目的文档, 项目下的PRD列表, 产品文档列表,
+        这个项目有什么文档, 文档列表, list documents, product_documents, 所有文档, 全部 PRD
+    DO NOT USE for: 获取某个具体文档的页面 (use lanhu_get_pages instead),
+        UI设计图列表 (use lanhu_get_designs instead)
+
+    Purpose: Discover available PRD/requirement documents in a project so the user can pick
+        the right one to analyze. Typically used BEFORE lanhu_get_pages when docId is unknown.
+
+    Returns a dict with top-level metadata and a simplified `documents` list. Each document
+    carries a ready-to-use `doc_url` that can be fed straight into lanhu_get_pages.
+    """
+    extractor = LanhuExtractor()
+    try:
+        params = extractor.parse_url(url)
+        team_id = params.get('team_id')
+        project_id = params.get('project_id')
+        return await extractor.list_product_documents(team_id, project_id)
+    finally:
+        await extractor.close()
 
 
 @mcp.tool()
@@ -6372,9 +6610,20 @@ async def lanhu_get_members(
     }
 
 
+@mcp.custom_route("/health", methods=["GET"])
+async def health_check(request):
+    from starlette.responses import JSONResponse
+    return JSONResponse({"status": "ok"})
+
+
 if __name__ == "__main__":
     # 运行MCP服务器
-    # 使用HTTP传输方式，支持环境变量配置
-    SERVER_HOST = os.getenv("SERVER_HOST", "0.0.0.0")
-    SERVER_PORT = int(os.getenv("SERVER_PORT", "8000"))
-    mcp.run(transport="http", path="/mcp", host=SERVER_HOST, port=SERVER_PORT)
+    # 默认使用HTTP传输；设置 MCP_TRANSPORT=stdio 时可由MCP客户端按需拉起。
+    MCP_TRANSPORT = os.getenv("MCP_TRANSPORT", "http").lower()
+
+    if MCP_TRANSPORT == "stdio":
+        mcp.run(transport="stdio")
+    else:
+        SERVER_HOST = os.getenv("SERVER_HOST", "0.0.0.0")
+        SERVER_PORT = int(os.getenv("SERVER_PORT", "8000"))
+        mcp.run(transport="http", path="/mcp", host=SERVER_HOST, port=SERVER_PORT)
